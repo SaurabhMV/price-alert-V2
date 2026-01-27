@@ -6,19 +6,46 @@ import pandas as pd
 import numpy as np
 
 # --- Page Config ---
-st.set_page_config(page_title="Trend Strength Bot", page_icon="💪", layout="wide")
-st.title("💪 Pro Bot: Trend Strength & Pullback Analyzer")
+st.set_page_config(page_title="Ultimate AI Trader", page_icon="🧠", layout="wide")
+st.title("🧠 Ultimate AI Trader: Trend, Momentum & Support")
 
-# --- Sidebar ---
-st.sidebar.header("Strategy Settings")
+# --- Sidebar: Credentials & Watchlist ---
+st.sidebar.header("🔐 Access & Target")
 bot_token = st.sidebar.text_input("Telegram Bot Token", type="password")
-chat_id = st.sidebar.text_input("Chat ID")
-ticker_input = st.sidebar.text_input("Watchlist", value="NVDA, TSLA, AAPL, BTC-USD")
-adx_threshold = st.sidebar.slider("Min Trend Strength (ADX)", 15, 50, 25)
+chat_id = st.sidebar.text_input("Authorized Chat ID")
+ticker_input = st.sidebar.text_input("Watchlist", value="NVDA, TSLA, AAPL, BTC-USD, ZGLD.TO")
 
-# --- Technical Indicators ---
+# --- Sidebar: Strategy Tuning ---
+st.sidebar.header("⚙️ Strategy Logic")
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    st.markdown("### 🟢 Buy Triggers")
+    buy_drop_pct = st.number_input("Min Pullback (%)", value=5.0)
+    rsi_oversold = st.slider("Max RSI (Buy)", 10, 40, 30)
+    min_adx = st.slider("Min Trend Strength (ADX)", 10, 50, 25, help="Only buy if trend is strong (>25)")
+
+with col2:
+    st.markdown("### 🔴 Sell Triggers")
+    sell_gain_pct = st.number_input("Profit Target (%)", value=3.0)
+    rsi_overbought = st.slider("Min RSI (Sell)", 60, 90, 70)
+
+check_interval = st.sidebar.number_input("Refresh Rate (seconds)", min_value=30, value=60)
+
+# --- Session State Init ---
+if 'running' not in st.session_state: st.session_state.running = False
+if 'last_fetch' not in st.session_state: st.session_state.last_fetch = 0
+if 'last_id' not in st.session_state: st.session_state.last_id = 0
+
+# --- 1. Technical Indicators (Math Engine) ---
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
 def calculate_adx(df, period=14):
-    """Calculates ADX (Trend Strength) using pure Pandas"""
+    """Calculates ADX to measure Trend Strength"""
     df = df.copy()
     df['H-L'] = df['High'] - df['Low']
     df['H-C'] = abs(df['High'] - df['Close'].shift(1))
@@ -38,67 +65,168 @@ def calculate_adx(df, period=14):
     
     return df['DX'].rolling(window=period).mean()
 
-def fetch_trend_data(tickers):
+# --- 2. Data Fetcher & Signal Engine ---
+def fetch_market_data(tickers):
     results = []
     for symbol in tickers:
         try:
             t = yf.Ticker(symbol)
+            # Need ~60 days of 1h data to calculate reliable SMA50 and ADX
             hist = t.history(period='60d', interval='1h')
             if hist.empty: continue
             
-            # 1. Standard Calculations
+            # Extract Prices
             curr = hist['Close'].iloc[-1]
-            h3 = hist['High'].tail(72).max() 
-            pullback = ((curr - h3) / h3) * 100
+            h3 = hist['High'].tail(72).max() # 3 days (approx 72 hours)
             
-            # 2. ADX (Trend Strength)
+            # --- CALCULATE INDICATORS ---
+            # 1. RSI
+            hist['RSI'] = calculate_rsi(hist['Close'])
+            curr_rsi = hist['RSI'].iloc[-1]
+            
+            # 2. SMA 50
+            sma50 = hist['Close'].rolling(window=50).mean().iloc[-1]
+            dist_sma = ((curr - sma50) / sma50) * 100
+            
+            # 3. ADX (Trend Strength)
             hist['ADX'] = calculate_adx(hist)
             curr_adx = hist['ADX'].iloc[-1]
             
-            # 3. Pullback Severity (Comparison to History)
-            # Calculate all hourly % drops in the last 60 days to find the "Average Drop"
-            hist['Hourly_Change'] = hist['Close'].pct_change() * 100
-            avg_drop = hist[hist['Hourly_Change'] < 0]['Hourly_Change'].mean() # e.g., -0.8%
+            # 4. Pullback
+            pullback = ((curr - h3) / h3) * 100
             
-            # Is current drop unusual? (e.g., current is -5%, avg is -1%)
-            severity_ratio = pullback / (avg_drop * 10) # rough scaler
+            # --- DECISION LOGIC ---
+            signal = "HOLD"
+            reason = ""
             
-            # Trend Interpretation
-            trend_status = "😴 Weak/Choppy"
-            if curr_adx > 25: trend_status = "🔥 Strong Trend"
-            if curr_adx > 50: trend_status = "🚀 Super Trend"
+            # BUY SIGNAL: Deep pullback + Oversold + Trend is NOT dead (ADX > min)
+            if pullback <= -buy_drop_pct and curr_rsi <= rsi_oversold:
+                if curr_adx >= min_adx:
+                    signal = "BUY"
+                    reason = f"Strong Trend Dip (ADX {curr_adx:.0f})"
+                else:
+                    signal = "WATCH" # Dip is good, but trend is too weak
+                    reason = f"Weak Trend (ADX {curr_adx:.0f})"
+
+            # SELL SIGNAL: Profit target hit OR Overbought OR Trend Breakdown
+            if curr >= h3 * (1 + sell_gain_pct/100) or curr_rsi >= rsi_overbought:
+                signal = "SELL"
+                reason = "Take Profit / Overbought"
+            elif curr < sma50 and dist_sma < -1.0: # 1% buffer below SMA
+                signal = "SELL"
+                reason = "Trend Breakdown (Below SMA)"
 
             results.append({
-                "Ticker": symbol, 
-                "Price": curr, 
-                "Pullback": pullback,
-                "ADX": curr_adx,
-                "Status": trend_status,
-                "Avg_Drop": avg_drop
+                "Ticker": symbol, "Price": curr, "Signal": signal, "Reason": reason,
+                "RSI": curr_rsi, "ADX": curr_adx, "SMA_Dist": dist_sma, "Pullback": pullback
             })
-        except: continue
+            
+        except Exception as e:
+            continue
     return results
 
-def send_alert(msg):
-    if bot_token and chat_id:
-        requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", 
-                      json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"})
+# --- 3. Telegram & Bot Logic ---
+def send_telegram(msg, ticker=None):
+    if not bot_token or not chat_id: return
+    
+    # Base Payload
+    payload = {
+        "chat_id": chat_id, "text": msg, "parse_mode": "Markdown"
+    }
+    
+    # Add Interactive Button if ticker provided
+    if ticker:
+        clean_ticker = ticker.replace(".TO", "").replace("-USD", "")
+        payload["reply_markup"] = {
+            "inline_keyboard": [[
+                {"text": f"📊 {ticker} Chart", "url": f"https://www.tradingview.com/symbols/{clean_ticker}"}
+            ]]
+        }
 
-# --- Main App ---
-if st.button("Analyze Trends"):
-    st.write("Fetching data... (This uses ADX formula)")
-    data = fetch_trend_data([t.strip() for t in ticker_input.split(",")])
+    try: requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json=payload)
+    except: pass
+
+def check_commands():
+    """Polls Telegram for /start, /stop, /status commands"""
+    if not bot_token or not chat_id: return False
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
+        r = requests.get(url, params={"offset": st.session_state.last_id + 1, "timeout": 1}).json()
+        
+        for u in r.get("result", []):
+            st.session_state.last_id = u["update_id"]
+            msg = u.get("message", {})
+            # Security Check
+            if str(msg.get("chat", {}).get("id")) != str(chat_id).strip(): continue
+            
+            text = msg.get("text", "").lower()
+            if "/start" in text:
+                st.session_state.running = True
+                send_telegram("🚀 *System Activated: Monitoring Trends...*")
+                return True
+            elif "/stop" in text:
+                st.session_state.running = False
+                send_telegram("🛑 *System Deactivated.*")
+                return True
+            elif "/status" in text:
+                send_telegram("⏳ *Scanning Market...*")
+                data = fetch_market_data([t.strip().upper() for t in ticker_input.split(",")])
+                report = "📊 *Current Status:*\n"
+                for i in data:
+                    icon = "🟢" if i['Signal'] == "BUY" else "🔴" if i['Signal'] == "SELL" else "⚪"
+                    report += f"{icon} *{i['Ticker']}*: ${i['Price']:.2f}\n"
+                    report += f"   RSI: `{i['RSI']:.0f}` | ADX: `{i['ADX']:.0f}`\n"
+                    report += f"   Signal: {i['Reason'] or 'Holding'}\n\n"
+                send_telegram(report)
+                return True
+    except: pass
+    return False
+
+# --- 4. Main Execution Loop ---
+# Check remote commands immediately
+if check_commands(): st.rerun()
+
+status = "🟢 RUNNING" if st.session_state.running else "🔴 STANDBY"
+st.sidebar.markdown(f"**Status:** {status}")
+
+if st.session_state.running:
+    tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
     
-    df = pd.DataFrame(data)
-    st.dataframe(df, use_container_width=True)
-    
-    for i in data:
-        # ALERT LOGIC: Strong Trend (ADX>25) + Significant Pullback
-        if i['ADX'] > adx_threshold and i['Pullback'] < -3.0:
-            msg = f"💪 *TREND STRENGTH ALERT: {i['Ticker']}*\n"
-            msg += f"The stock is in a **{i['Status']}** (ADX: {i['ADX']:.1f})\n"
-            msg += f"📉 Current Pullback: `{i['Pullback']:.2f}%`\n"
-            msg += f"📊 Historical Avg Drop: `{i['Avg_Drop']:.2f}%`\n"
-            msg += "This is a strong trend taking a breather. Watch for entry!"
-            send_alert(msg)
-            st.success(f"Alert sent for {i['Ticker']}")
+    # Timer Logic
+    now = time.time()
+    if now - st.session_state.last_fetch >= check_interval:
+        with st.spinner("Analyzing Technicals..."):
+            data = fetch_market_data(tickers)
+            st.session_state.last_fetch = now
+            
+            # Display Dashboard
+            if data:
+                df = pd.DataFrame(data)
+                # Style the dataframe for easy reading
+                st.dataframe(df.style.map(lambda x: 'color: green' if x == "BUY" else 'color: red' if x == "SELL" else '', subset=['Signal']), 
+                             use_container_width=True)
+                
+                # Alert Loop
+                for i in data:
+                    if i['Signal'] == "BUY":
+                        msg = f"🟢 *BUY ALERT: {i['Ticker']}*\n" \
+                              f"📉 Pullback: `{i['Pullback']:.2f}%`\n" \
+                              f"💪 Trend Strength: `{i['ADX']:.1f}` (Strong)\n" \
+                              f"📊 RSI: `{i['RSI']:.0f}` (Oversold)"
+                        send_telegram(msg, i['Ticker'])
+                        
+                    elif i['Signal'] == "SELL":
+                        emoji = "💰" if "Profit" in i['Reason'] else "⚠️"
+                        msg = f"{emoji} *SELL ALERT: {i['Ticker']}*\n" \
+                              f"Reason: {i['Reason']}\n" \
+                              f"Price: `${i['Price']:.2f}`"
+                        send_telegram(msg, i['Ticker'])
+
+    # Smart Sleep (keeps bot responsive)
+    time.sleep(10)
+    st.rerun()
+
+else:
+    st.info("System is in Standby. Send `/start` via Telegram to begin.")
+    time.sleep(10)
+    st.rerun()
