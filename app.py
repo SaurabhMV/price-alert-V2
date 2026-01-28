@@ -11,7 +11,6 @@ st.title("🎯 AI Confluence Trader: Live Dashboard")
 
 # --- Sidebar: Configuration & Control ---
 st.sidebar.header("🔐 Credentials")
-# Use secrets if deployed, otherwise fallback to text input for local testing
 try:
     bot_token = st.secrets["BOT_TOKEN"]
     chat_id = st.secrets["CHAT_ID"]
@@ -24,19 +23,12 @@ st.sidebar.header("⚙️ Strategy Settings")
 ticker_input = st.sidebar.text_input("Watchlist", value="NVDA, TSLA, AAPL, BTC-USD, AMZN")
 check_interval = st.sidebar.number_input("Refresh Rate (sec)", min_value=10, value=60)
 
-# --- NEW: UI CONTROL BUTTONS ---
 st.sidebar.header("🚀 Bot Control")
-if 'running' not in st.session_state:
-    st.session_state.running = False
+if 'running' not in st.session_state: st.session_state.running = False
 
 col1, col2 = st.sidebar.columns(2)
-if col1.button("▶️ START BOT", use_container_width=True):
-    st.session_state.running = True
-    st.toast("Bot Started!")
-
-if col2.button("🛑 STOP BOT", use_container_width=True):
-    st.session_state.running = False
-    st.toast("Bot Stopped.")
+if col1.button("▶️ START BOT", use_container_width=True): st.session_state.running = True
+if col2.button("🛑 STOP BOT", use_container_width=True): st.session_state.running = False
 
 # --- Indicator Calculations ---
 def calculate_rsi(series, period=14):
@@ -62,37 +54,26 @@ def calculate_adx(df, period=14):
     return df['DX'].rolling(window=period).mean()
 
 # --- Scoring & Recommendation Logic ---
-def get_analysis(rsi, adx, dist_sma, pullback):
+def get_analysis(rsi, adx, dist_sma):
     score = 0
     if rsi < 30: score += 4
     elif rsi < 40: score += 2
-    
     if adx > 25: score += 3
     elif adx > 20: score += 1
-    
     if -2 < dist_sma < 2: score += 3 
     elif dist_sma > 0: score += 1     
 
     rec = "HOLD"
-    reason = "Neutral market conditions"
-
+    reason = "Neutral"
     if adx > 20 and dist_sma > -2 and rsi < 40:
-        rec = "BUY"
-        reason = "Bullish Pullback: Strong trend finding support"
+        rec = "BUY"; reason = "Bullish Pullback"
     elif rsi < 30 and dist_sma < -5:
-        rec = "BUY (RISKY)"
-        reason = "Oversold Bounce: Mean reversion play"
-    
+        rec = "BUY (RISKY)"; reason = "Oversold Bounce"
     if rsi > 70:
-        rec = "SELL"
-        reason = "Overbought: RSI indicates exhaustion"
+        rec = "SELL"; reason = "Overbought"
     elif adx > 25 and dist_sma < -2:
-        rec = "SELL / AVOID"
-        reason = "Strong Downtrend: Momentum is pushing price lower"
-    elif dist_sma < -5 and adx > 40:
-        rec = "STRONG SELL"
-        reason = "Panic Mode: High-intensity crash detected"
-
+        rec = "SELL / AVOID"; reason = "Strong Downtrend"
+    
     return score, rec, reason
 
 # --- Data Engine ---
@@ -109,18 +90,28 @@ def fetch_data(tickers):
             rsi = calculate_rsi(hist['Close']).iloc[-1]
             adx = calculate_adx(hist).iloc[-1]
             sma50 = hist['Close'].rolling(window=50).mean().iloc[-1]
+            
             dist_sma = ((curr - sma50) / sma50) * 100
             pullback = ((curr - h3) / h3) * 100
+            score, rec, reason = get_analysis(rsi, adx, dist_sma)
             
-            score, rec, reason = get_analysis(rsi, adx, dist_sma, pullback)
-            trend_status = "🔥 Strong" if adx > 25 else "😴 Weak" if adx < 20 else "🤔 Building"
+            # --- NEW: Range Calculations ---
+            # Buy zone is around the SMA support line
+            buy_low, buy_high = sma50 * 0.985, sma50 * 1.01
+            # Sell zone is around the recent resistance (high)
+            sell_low, sell_high = h3 * 0.99, h3 * 1.01
             
             results.append({
-                "Ticker": symbol, "Price": round(curr, 2), "Score": score, 
-                "Recommendation": rec, "Reason": reason,
-                "Trend": trend_status, "ADX": round(adx, 1), 
-                "RSI": round(rsi, 1), "Pullback %": round(pullback, 2), 
-                "Dist_SMA %": round(dist_sma, 2)
+                "Ticker": symbol, 
+                "Price": round(curr, 2), 
+                "Score": score, 
+                "Recommendation": rec, 
+                "Buy Range": f"${buy_low:.2f} - ${buy_high:.2f}",
+                "Sell Range": f"${sell_low:.2f} - ${sell_high:.2f}",
+                "Reason": reason,
+                "Trend": "🔥 Strong" if adx > 25 else "😴 Weak" if adx < 20 else "🤔 Building", 
+                "ADX": round(adx, 1), "RSI": round(rsi, 1), 
+                "Pullback %": round(pullback, 2), "Dist_SMA %": round(dist_sma, 2)
             })
         except: continue
     return results
@@ -134,23 +125,15 @@ def send_telegram(msg):
 st.sidebar.markdown(f"**Current Status:** {'🟢 ACTIVE' if st.session_state.running else '🔴 STANDBY'}")
 
 if st.session_state.running:
-    with st.spinner("Analyzing Market..."):
-        data = fetch_data([t.strip().upper() for t in ticker_input.split(",")])
-        if data:
-            df = pd.DataFrame(data)
-            # Display Dashboard Table
-            st.dataframe(df.sort_values("Score", ascending=False), use_container_width=True, hide_index=True)
-            
-            # Send Telegram Alerts
-            for i in data:
-                if i['Score'] >= 8 or i['Recommendation'] in ["BUY", "STRONG SELL"]:
-                    msg = f"📣 *REC: {i['Recommendation']} ({i['Ticker']})*\n"
-                    msg += f"Score: `{i['Score']}/10` | Price: `${i['Price']}`\n"
-                    msg += f"Reason: _{i['Reason']}_"
-                    send_telegram(msg)
-                    
-    # The "Loop" mechanism
+    data = fetch_data([t.strip().upper() for t in ticker_input.split(",")])
+    if data:
+        df = pd.DataFrame(data)
+        st.dataframe(df.sort_values("Score", ascending=False), use_container_width=True, hide_index=True)
+        for i in data:
+            if i['Score'] >= 8 or i['Recommendation'] in ["BUY", "STRONG SELL"]:
+                msg = f"📣 *REC: {i['Recommendation']} ({i['Ticker']})*\nPrice: `${i['Price']}`\nBuy Zone: `{i['Buy Range']}`\nSell Zone: `{i['Sell Range']}`"
+                send_telegram(msg)
     time.sleep(check_interval)
     st.rerun()
 else:
-    st.info("System is in Standby. Click **START BOT** in the sidebar to begin monitoring.")
+    st.info("System Standby. Click **START BOT** to monitor.")
