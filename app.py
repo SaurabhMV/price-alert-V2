@@ -7,17 +7,36 @@ import numpy as np
 
 # --- Page Config ---
 st.set_page_config(page_title="AI Confluence Trader", page_icon="🎯", layout="wide")
-st.title("🎯 AI Confluence Trader: Advanced Recommendations")
+st.title("🎯 AI Confluence Trader: Live Dashboard")
 
-# --- Sidebar: Config ---
-st.sidebar.header("🔐 Access & Watchlist")
-bot_token = st.sidebar.text_input("Telegram Bot Token", type="password")
-chat_id = st.sidebar.text_input("Authorized Chat ID")
+# --- Sidebar: Configuration & Control ---
+st.sidebar.header("🔐 Credentials")
+# Use secrets if deployed, otherwise fallback to text input for local testing
+try:
+    bot_token = st.secrets["BOT_TOKEN"]
+    chat_id = st.secrets["CHAT_ID"]
+    st.sidebar.success("✅ Secrets Loaded")
+except:
+    bot_token = st.sidebar.text_input("Telegram Bot Token", type="password")
+    chat_id = st.sidebar.text_input("Authorized Chat ID")
+
+st.sidebar.header("⚙️ Strategy Settings")
 ticker_input = st.sidebar.text_input("Watchlist", value="NVDA, TSLA, AAPL, BTC-USD, AMZN")
+check_interval = st.sidebar.number_input("Refresh Rate (sec)", min_value=10, value=60)
 
-st.sidebar.header("⚙️ Strategy Logic")
-buy_drop_pct = st.sidebar.number_input("Min Pullback (%)", value=5.0)
-check_interval = st.sidebar.number_input("Refresh Rate (sec)", min_value=30, value=60)
+# --- NEW: UI CONTROL BUTTONS ---
+st.sidebar.header("🚀 Bot Control")
+if 'running' not in st.session_state:
+    st.session_state.running = False
+
+col1, col2 = st.sidebar.columns(2)
+if col1.button("▶️ START BOT", use_container_width=True):
+    st.session_state.running = True
+    st.toast("Bot Started!")
+
+if col2.button("🛑 STOP BOT", use_container_width=True):
+    st.session_state.running = False
+    st.toast("Bot Stopped.")
 
 # --- Indicator Calculations ---
 def calculate_rsi(series, period=14):
@@ -45,23 +64,18 @@ def calculate_adx(df, period=14):
 # --- Scoring & Recommendation Logic ---
 def get_analysis(rsi, adx, dist_sma, pullback):
     score = 0
-    # 1. Momentum (RSI) - Max 4 points
     if rsi < 30: score += 4
     elif rsi < 40: score += 2
     
-    # 2. Trend Strength (ADX) - Max 3 points
     if adx > 25: score += 3
     elif adx > 20: score += 1
     
-    # 3. Support (Dist_SMA) - Max 3 points
     if -2 < dist_sma < 2: score += 3 
     elif dist_sma > 0: score += 1     
 
-    # Recommendation Engine
     rec = "HOLD"
     reason = "Neutral market conditions"
 
-    # BUY LOGIC
     if adx > 20 and dist_sma > -2 and rsi < 40:
         rec = "BUY"
         reason = "Bullish Pullback: Strong trend finding support"
@@ -69,7 +83,6 @@ def get_analysis(rsi, adx, dist_sma, pullback):
         rec = "BUY (RISKY)"
         reason = "Oversold Bounce: Mean reversion play"
     
-    # SELL LOGIC
     if rsi > 70:
         rec = "SELL"
         reason = "Overbought: RSI indicates exhaustion"
@@ -100,61 +113,44 @@ def fetch_data(tickers):
             pullback = ((curr - h3) / h3) * 100
             
             score, rec, reason = get_analysis(rsi, adx, dist_sma, pullback)
-            
             trend_status = "🔥 Strong" if adx > 25 else "😴 Weak" if adx < 20 else "🤔 Building"
             
             results.append({
-                "Ticker": symbol, "Price": curr, "Score": score, 
+                "Ticker": symbol, "Price": round(curr, 2), "Score": score, 
                 "Recommendation": rec, "Reason": reason,
                 "Trend": trend_status, "ADX": round(adx, 1), 
-                "RSI": round(rsi, 1), "Pullback": round(pullback, 2), 
-                "Dist_SMA": round(dist_sma, 2)
+                "RSI": round(rsi, 1), "Pullback %": round(pullback, 2), 
+                "Dist_SMA %": round(dist_sma, 2)
             })
         except: continue
     return results
 
-# --- Telegram Helper ---
 def send_telegram(msg):
     if bot_token and chat_id:
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         requests.post(url, json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"})
 
-# --- Main App ---
-if 'running' not in st.session_state: st.session_state.running = False
-
-# Command Polling (Condensed)
-if bot_token and chat_id:
-    try:
-        url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
-        r = requests.get(url, params={"offset": st.session_state.get('last_id', 0) + 1, "timeout": 1}).json()
-        for u in r.get("result", []):
-            st.session_state.last_id = u["update_id"]
-            txt = u.get("message", {}).get("text", "").lower()
-            if "/start" in txt: st.session_state.running = True; send_telegram("🚀 *Bot Online*")
-            if "/stop" in txt: st.session_state.running = False; send_telegram("🛑 *Bot Offline*")
-            if "/status" in txt: send_telegram("⌛ *Scanning watchlist...*")
-    except: pass
-
-st.sidebar.markdown(f"**Bot Status:** {'🟢 ON' if st.session_state.running else '🔴 OFF'}")
+# --- Main App Execution ---
+st.sidebar.markdown(f"**Current Status:** {'🟢 ACTIVE' if st.session_state.running else '🔴 STANDBY'}")
 
 if st.session_state.running:
-    data = fetch_data([t.strip().upper() for t in ticker_input.split(",")])
-    if data:
-        df = pd.DataFrame(data)
-        
-        # UI: Sorting by Score and color-coding recommendations
-        st.dataframe(df.sort_values("Score", ascending=False), use_container_width=True, hide_index=True)
-        
-        for i in data:
-            if i['Score'] >= 8 or i['Recommendation'] in ["BUY", "STRONG SELL"]:
-                msg = f"📣 *REC: {i['Recommendation']} ({i['Ticker']})*\n"
-                msg += f"Score: `{i['Score']}/10` | Price: `${i['Price']:.2f}`\n"
-                msg += f"Reason: _{i['Reason']}_"
-                send_telegram(msg)
-                
+    with st.spinner("Analyzing Market..."):
+        data = fetch_data([t.strip().upper() for t in ticker_input.split(",")])
+        if data:
+            df = pd.DataFrame(data)
+            # Display Dashboard Table
+            st.dataframe(df.sort_values("Score", ascending=False), use_container_width=True, hide_index=True)
+            
+            # Send Telegram Alerts
+            for i in data:
+                if i['Score'] >= 8 or i['Recommendation'] in ["BUY", "STRONG SELL"]:
+                    msg = f"📣 *REC: {i['Recommendation']} ({i['Ticker']})*\n"
+                    msg += f"Score: `{i['Score']}/10` | Price: `${i['Price']}`\n"
+                    msg += f"Reason: _{i['Reason']}_"
+                    send_telegram(msg)
+                    
+    # The "Loop" mechanism
     time.sleep(check_interval)
     st.rerun()
 else:
-    st.info("System Standby. Send `/start` to your Telegram bot.")
-    time.sleep(10)
-    st.rerun()
+    st.info("System is in Standby. Click **START BOT** in the sidebar to begin monitoring.")
