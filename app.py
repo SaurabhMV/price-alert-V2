@@ -20,7 +20,7 @@ except:
     chat_id = st.sidebar.text_input("Authorized Chat ID")
 
 st.sidebar.header("⚙️ Strategy Settings")
-ticker_input = st.sidebar.text_input("Watchlist", value="NVDA, TSLA, AAPL, BTC-USD, AMZN")
+ticker_input = st.sidebar.text_input("Watchlist", value="AMZN, AVGO, GOOGL, JPM, META.TO, MU, NVDA.TO, QCOM, SHOP.TO, TD.TO, MSFT, SVR.TO, ZGLD.TO")
 check_interval = st.sidebar.number_input("Refresh Rate (sec)", min_value=10, value=60)
 
 st.sidebar.header("🚀 Bot Control")
